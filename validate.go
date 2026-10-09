@@ -22,17 +22,15 @@ type indexEntry struct {
 	Stat fileStat
 }
 
-// validateClones hashes every file the plan claims to have cloned and
-// returns index entries for those that really do hold the target blob.
+// validateClones verifies every file the plan claims to have cloned and
+// returns index entries for those that hold the target checkout bytes.
 //
-// This is the step that lets us skip Git's own refresh: Git would hash the
-// same bytes single-threaded with a collision-detecting SHA-1, which on a
-// large repo costs more than the checkout we are trying to avoid. Doing it
-// ourselves across all cores is roughly an order of magnitude cheaper.
+// Identity checkouts are hashed across all cores. Files that may undergo
+// line ending conversion are compared with Git's filtered checkout content.
 //
-// Anything that fails to hash, or hashes to the wrong value — a source file
-// that was dirty in a way its stat cache hadn't noticed, a clone that raced
-// with a writer — is simply left out, and the final checkout rewrites it.
+// Files that fail verification are left out, and the final checkout rewrites
+// them. This covers source changes missed by the stat cache and clones that
+// raced with a writer.
 func validateClones(root string, tgt *treeIndex, plan clonePlan) []indexEntry {
 	cloned := plan.coverage()
 	var candidates []string
@@ -47,6 +45,11 @@ func validateClones(root string, tgt *treeIndex, plan clonePlan) []indexEntry {
 	if len(candidates) == 0 {
 		return nil
 	}
+	kinds, ok := checkoutConversionKinds(root, candidates)
+	if !ok {
+		return nil // unknown checkout rules must be left to Git
+	}
+	converted := prepareCheckoutConversions(root, tgt, candidates, kinds)
 
 	entries := make([]indexEntry, len(candidates))
 	var wg sync.WaitGroup
@@ -55,6 +58,9 @@ func validateClones(root string, tgt *treeIndex, plan clonePlan) []indexEntry {
 		wg.Go(func() {
 			buf := make([]byte, 128*1024)
 			for i := range work {
+				if kinds[i] != checkoutRaw {
+					continue
+				}
 				path := candidates[i]
 				if e, ok := validateOne(root, path, tgt.Blobs[path], buf); ok {
 					entries[i] = e
@@ -74,10 +80,28 @@ func validateClones(root string, tgt *treeIndex, plan clonePlan) []indexEntry {
 			valid = append(valid, e)
 		}
 	}
+	valid = append(valid, validateCheckoutConversions(root, tgt, converted)...)
 	return valid
 }
 
 func validateOne(root, path string, te TreeEntry, buf []byte) (indexEntry, bool) {
+	e, ok := cloneStatEntry(root, path, te)
+	if !ok {
+		return indexEntry{}, false
+	}
+	full := filepath.Join(root, path)
+	oid, err := hashBlob(full, e.Stat.FullSize, len(te.SHA)/2, buf)
+	if err != nil || hex.EncodeToString(oid) != te.SHA {
+		return indexEntry{}, false
+	}
+	if st, err := lstatFields(full); err != nil || st != e.Stat {
+		return indexEntry{}, false
+	}
+	return e, true
+}
+
+// cloneStatEntry checks the file type and mode without claiming its content.
+func cloneStatEntry(root, path string, te TreeEntry) (indexEntry, bool) {
 	full := filepath.Join(root, path)
 	st, err := lstatFields(full)
 	if err != nil || !st.IsRegular() {
@@ -88,12 +112,13 @@ func validateOne(root, path string, te TreeEntry, buf []byte) (indexEntry, bool)
 		return indexEntry{}, false
 	}
 	// Git records only the executable bit, and derives it from the file.
-	// A mismatch means the clone didn't reproduce the recorded mode.
-	if wantExec := te.Mode == "100755"; wantExec != st.IsExecutable() {
+	// Windows files don't have executable permission bits; keep the tree's
+	// mode in the index instead, as Git does with core.filemode=false.
+	if wantExec := te.Mode == "100755"; runtime.GOOS != "windows" && wantExec != st.IsExecutable() {
 		return indexEntry{}, false
 	}
-	oid, err := hashBlob(full, int64(st.Size), len(te.SHA)/2, buf)
-	if err != nil || hex.EncodeToString(oid) != te.SHA {
+	oid, err := hex.DecodeString(te.SHA)
+	if err != nil || len(oid) != sha1.Size && len(oid) != sha256.Size {
 		return indexEntry{}, false
 	}
 	return indexEntry{Path: path, Mode: uint32(mode), OID: oid, Stat: st}, true

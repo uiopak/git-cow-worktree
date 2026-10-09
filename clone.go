@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	gitpath "path"
 	"path/filepath"
 	"runtime"
 	"sync"
@@ -72,11 +73,11 @@ func planClones(src, tgt *treeIndex, excluded map[string]bool, cloneDirs bool) c
 }
 
 // childPaths indexes a tree by parent directory. The root's children are
-// keyed by ".", matching filepath.Dir.
+// keyed by ".". Git tree paths use slashes on every platform.
 func childPaths(ti *treeIndex) map[string][]string {
 	children := make(map[string][]string)
 	add := func(path string) {
-		d := filepath.Dir(path)
+		d := gitpath.Dir(path)
 		children[d] = append(children[d], path)
 	}
 	for path := range ti.Trees {
@@ -117,7 +118,7 @@ func (c coverage) covers(path string) bool {
 	if c.files[path] {
 		return true
 	}
-	for d := filepath.Dir(path); d != "." && d != string(filepath.Separator); d = filepath.Dir(d) {
+	for d := gitpath.Dir(path); d != "." && d != "/"; d = gitpath.Dir(d) {
 		if c.dirs[d] {
 			return true
 		}
@@ -231,13 +232,13 @@ func parentDirs(paths ...[]string) []string {
 	seen := make(map[string]struct{})
 	for _, group := range paths {
 		for _, p := range group {
-			d := filepath.Dir(p)
-			for d != "." && d != string(filepath.Separator) && d != "" {
+			d := gitpath.Dir(p)
+			for d != "." && d != "/" {
 				if _, ok := seen[d]; ok {
 					break
 				}
 				seen[d] = struct{}{}
-				d = filepath.Dir(d)
+				d = gitpath.Dir(d)
 			}
 		}
 	}

@@ -18,7 +18,8 @@ func lstatFields(path string) (fileStat, error) {
 		Ino:       uint32(st.Ino),
 		Uid:       st.Uid,
 		Gid:       st.Gid,
-		Size:      uint32(st.Size),
+		Size:      gitIndexSize(st.Size),
+		FullSize:  st.Size,
 		mode:      uint32(st.Mode),
 	}, nil
 }

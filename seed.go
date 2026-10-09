@@ -20,7 +20,7 @@ import (
 func finalizeCheckout(repoDir, targetSHA string) error {
 	cmd := exec.Command("git",
 		"-c", "checkout.workers=0",
-		"-c", "core.hooksPath=/dev/null",
+		"-c", "core.hooksPath="+os.DevNull,
 		"checkout", "-f", "HEAD")
 	cmd.Dir = repoDir
 	cmd.Stdin = os.Stdin

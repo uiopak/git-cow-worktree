@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -294,6 +295,9 @@ func TestE2E_UnusableIndexRecovers(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not on PATH")
 	}
+	if !cowSupported(t, t.TempDir()) {
+		t.Skip("index recovery requires a filesystem with copy-on-write support")
+	}
 	gitCowWorktree := buildGitCowWorktree(t)
 
 	mkRepo := func(label string) *repo {
@@ -558,7 +562,7 @@ func TestE2E_SkipsUnmaterializedSource(t *testing.T) {
 		t.Errorf("expected %q, got:\n%s", want, out)
 	}
 	// The point of stepping over it: seeding actually happens.
-	if !strings.Contains(out, "cloned ") || strings.Contains(out, "cloned 0 dirs, 0 files") {
+	if cowSupported(t, cowRepo.parent) && (!strings.Contains(out, "cloned ") || strings.Contains(out, "cloned 0 dirs, 0 files")) {
 		t.Errorf("expected files to be cloned from the fallback source, got:\n%s", out)
 	}
 
@@ -947,6 +951,9 @@ func buildGitCowWorktree(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	out := filepath.Join(dir, "git-cow-worktree")
+	if runtime.GOOS == "windows" {
+		out += ".exe"
+	}
 	cmd := exec.Command("go", "build", "-o", out, ".")
 	if got, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\n%s", err, string(got))
@@ -990,6 +997,11 @@ func newRepoWithGitInitArgs(t *testing.T, label string, skipOnInitError bool, in
 	r.run("git", "config", "user.email", "test@example.com")
 	r.run("git", "config", "user.name", "Test")
 	r.run("git", "config", "commit.gpgsign", "false")
+	// These tests compare working-tree bytes directly with committed blobs.
+	r.run("git", "config", "core.autocrlf", "false")
+	if runtime.GOOS == "windows" {
+		r.run("git", "config", "core.symlinks", "true")
+	}
 	return r
 }
 
@@ -1061,6 +1073,9 @@ func (r *repo) symlink(linkPath, target string) {
 		r.t.Fatal(err)
 	}
 	if err := os.Symlink(target, full); err != nil {
+		if runtime.GOOS == "windows" {
+			r.t.Skipf("symlink unavailable: %v", err)
+		}
 		r.t.Fatal(err)
 	}
 	r.run("git", "add", linkPath)
@@ -1151,12 +1166,29 @@ func assertShared(t *testing.T, src, dst string) {
 		return
 	}
 	srcFiles, dstFiles := snapshot(t, src), snapshot(t, dst)
+	var srcTree, dstTree *treeIndex
+	if runtime.GOOS == "windows" {
+		// Windows permissions don't expose executable mode changes, which
+		// planClones deliberately leaves to checkout.
+		var err error
+		srcTree, err = lsTree(src, "HEAD")
+		if err != nil {
+			t.Fatal(err)
+		}
+		dstTree, err = lsTree(dst, "HEAD")
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	var shared int
 	for path, sig := range dstFiles {
 		if sig.mode != "f" && sig.mode != "fx" {
 			continue // symlinks are Git's to write
 		}
 		if srcFiles[path] != sig {
+			continue
+		}
+		if srcTree != nil && srcTree.Blobs[filepath.ToSlash(path)].Mode != dstTree.Blobs[filepath.ToSlash(path)].Mode {
 			continue
 		}
 		srcInfo, err := os.Lstat(filepath.Join(src, path))

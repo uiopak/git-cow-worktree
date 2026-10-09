@@ -22,6 +22,8 @@ const (
 	maxSourceAttempts = 3
 )
 
+var version = "dev"
+
 // Options collected from argv after light parsing.
 type Options struct {
 	Verbose       bool
@@ -37,6 +39,10 @@ type Options struct {
 }
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "--version" {
+		fmt.Printf("%s %s\n", commandName, version)
+		return
+	}
 	if len(os.Args) < 2 || os.Args[1] != "add" {
 		fmt.Fprintf(os.Stderr, "usage: %s add [-b <new-branch>] [-B <branch>] [--from <path>] [-v] <path> [<commit-ish>]\n", commandName)
 		os.Exit(2)

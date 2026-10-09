@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -53,7 +54,7 @@ func parseWorktreesPorcelain(out string) []Worktree {
 			line := sc.Text()
 			switch {
 			case strings.HasPrefix(line, "worktree "):
-				wt.Path = strings.TrimPrefix(line, "worktree ")
+				wt.Path = filepath.Clean(strings.TrimPrefix(line, "worktree "))
 			case strings.HasPrefix(line, "HEAD "):
 				h := strings.TrimPrefix(line, "HEAD ")
 				if h != "0000000000000000000000000000000000000000" {
@@ -217,6 +218,9 @@ func samePath(a, b string) bool {
 	if err1 != nil || err2 != nil {
 		return a == b
 	}
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(ar, br)
+	}
 	return ar == br
 }
 
@@ -225,6 +229,9 @@ func pathHasPrefix(child, parent string) bool {
 	pr, err2 := absClean(parent)
 	if err1 != nil || err2 != nil {
 		return strings.HasPrefix(child, parent)
+	}
+	if runtime.GOOS == "windows" {
+		cr, pr = strings.ToLower(cr), strings.ToLower(pr)
 	}
 	if cr == pr {
 		return true

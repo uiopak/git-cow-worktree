@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
-	"path/filepath"
+	gitpath "path"
 	"sort"
 	"strings"
 )
@@ -193,7 +193,7 @@ func sourceExclusions(worktree, ref string) (excluded map[string]bool, dirty int
 func taint(excluded map[string]bool) map[string]bool {
 	tainted := make(map[string]bool, len(excluded))
 	for p := range excluded {
-		for d := filepath.Dir(p); d != "." && d != string(filepath.Separator); d = filepath.Dir(d) {
+		for d := gitpath.Dir(p); d != "." && d != "/"; d = gitpath.Dir(d) {
 			if tainted[d] {
 				break // and so are all of its parents
 			}
