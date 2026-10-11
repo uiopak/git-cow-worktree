@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test"
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { isAbsolute, join, relative, resolve, sep } from "node:path"
 import { run } from "./command"
@@ -15,7 +15,7 @@ const strategy = () => makeStrategy({ executable: cow, gitExecutable: git })
 
 async function fixture() {
   await mkdir(base, { recursive: true })
-  const dir = await mkdtemp(join(base, "cow-plugin-"))
+  const dir = await realpath(await mkdtemp(join(base, "cow-plugin-")))
   directories.push(dir)
   const source = join(dir, "source spaces λ")
   await mkdir(source)
@@ -35,7 +35,7 @@ async function fixture() {
 
 afterEach(async () => {
   for (const directory of directories.splice(0)) {
-    const child = relative(base, directory)
+    const child = relative(await realpath(base), directory)
     if (isAbsolute(child) || child.includes(sep) || !child.startsWith("cow-plugin-")) throw new Error("Unsafe test cleanup path")
     await rm(directory, { recursive: true, force: true })
   }
@@ -64,6 +64,20 @@ test("creates correct checkout, inventories only owned worktrees and removes unc
   expect(await backend.list(source, context())).toHaveLength(2)
   await expect(backend.remove({ directory: normal, force: true }, context())).rejects.toThrow("not owned")
   const branch = await command(target, ["branch", "--show-current"])
+  await backend.remove({ directory: target, force: false }, context())
+  expect(await command(source, ["branch", "--list", branch])).toBe("")
+  expect(await backend.list(source, context())).toHaveLength(1)
+})
+
+test.if(process.platform === "win32")("Windows temporary-directory aliases preserve ownership and cleanup", async () => {
+  const { source, dir } = await fixture()
+  const target = join(base, relative(await realpath(base), dir), "new parent", "worktree spaces λ")
+  const backend = strategy()
+  const created = await backend.create({ sourceDirectory: source, directory: target }, context())
+  expect(created.directory).toBe(await realpath(target))
+  expect(await command(created.directory, ["status", "--short"])).toBe("")
+  expect(await backend.list(source, context())).toHaveLength(2)
+  const branch = await command(created.directory, ["branch", "--show-current"])
   await backend.remove({ directory: target, force: false }, context())
   expect(await command(source, ["branch", "--list", branch])).toBe("")
   expect(await backend.list(source, context())).toHaveLength(1)

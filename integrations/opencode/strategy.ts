@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto"
 import { lstat, readFile, realpath, writeFile } from "node:fs/promises"
-import { dirname, isAbsolute, join, resolve } from "node:path"
+import { basename, dirname, isAbsolute, join, resolve } from "node:path"
 import { Worktree } from "@opencode/plugin"
 import type { WorktreeDefinition } from "@opencode/plugin/promise/worktree"
 import { CommandError, run } from "./command"
@@ -32,6 +32,19 @@ async function noSymlinks(directory: string): Promise<void> {
       if ((await lstat(current)).isSymbolicLink()) throw new Error(`Refusing symlinked worktree path: ${current}`)
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error }
     if (dirname(current) === current) return
+  }
+}
+
+// Git expands Windows short names in its worktree inventory. Resolve the
+// existing parent before creation, including when Git must create directories.
+async function canonicalDestination(directory: string): Promise<string> {
+  const missing: string[] = []
+  for (let current = directory; ; current = dirname(current)) {
+    try { return join(await realpath(current), ...missing.reverse()) }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT" || dirname(current) === current) throw error
+    }
+    missing.push(basename(current))
   }
 }
 
@@ -105,8 +118,9 @@ export function makeStrategy(options: Record<string, unknown> = {}): WorktreeDef
     async create(input, { signal }) {
       signal.throwIfAborted()
       const source = await realpath(input.sourceDirectory)
-      const directory = resolve(input.directory)
-      await noSymlinks(directory)
+      const requestedDirectory = resolve(input.directory)
+      await noSymlinks(requestedDirectory)
+      const directory = await canonicalDestination(requestedDirectory)
       try { await lstat(directory); throw new Error(`Worktree destination already exists: ${directory}`) }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error }
       root(await inventory(source, signal))
