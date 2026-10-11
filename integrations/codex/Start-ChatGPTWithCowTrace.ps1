@@ -126,7 +126,10 @@ if ((Test-Path -LiteralPath $proxy) -and (Get-FileHash -LiteralPath $proxy -Algo
     throw "Existing proxy differs from the selected shim: '$proxy'. Use a new dedicated directory."
 }
 $running = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
-    $_.Path -ieq $AppPath -or ($appName -ieq 'ChatGPT' -and $_.ProcessName -ieq 'ChatGPT')
+    # Process paths can use an 8.3 spelling while Get-Item expands AppPath.
+    $processPath = $_.Path
+    ($processPath -and (Get-Item -LiteralPath $processPath -ErrorAction SilentlyContinue).FullName -ieq $AppPath) -or
+        ($appName -ieq 'ChatGPT' -and $_.ProcessName -ieq 'ChatGPT')
 })
 $summary = [ordered]@{
     App = $AppPath; AppVersion = (Get-Item -LiteralPath $AppPath).VersionInfo.ProductVersion

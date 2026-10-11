@@ -80,7 +80,9 @@ $backendPaths = @(
     (Join-Path $appDirectory 'resources\app\extensions\antigravity\bin\language_server_windows_arm.exe'),
     (Join-Path $appDirectory 'resources\app\extensions\antigravity\bin\language_server_windows_arm64.exe')
 )
-$runningBackends = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $backendPaths -icontains $_.Path })
+$runningBackends = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+    $_.Path -and $backendPaths -icontains (Get-Item -LiteralPath $_.Path -ErrorAction SilentlyContinue).FullName
+})
 if (-not $CheckOnly -and -not $PrepareOnly -and $runningBackends.Count -gt 0) {
     throw "$displayName's language server is already running. Finish your sessions and exit the app completely before using the trace shortcut. Existing processes have been left running."
 }

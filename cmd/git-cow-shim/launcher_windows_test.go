@@ -25,7 +25,7 @@ func TestT3LauncherCheckAndProcessEnvironment(t *testing.T) {
 		t.Fatal(err)
 	}
 	self, _ := os.Executable()
-	base := t.TempDir()
+	base := canonicalTempDir(t)
 	proxyDir := filepath.Join(base, "dedicated shim Ω")
 	reportFile := filepath.Join(base, "report.json")
 	traceFile := filepath.Join(base, "trace 日本.jsonl")

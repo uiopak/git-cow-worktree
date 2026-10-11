@@ -122,7 +122,7 @@ func TestFileTraceSchemaRoutingAndStreams(t *testing.T) {
 				routed = item.args
 			}
 			for _, record := range records {
-				if record.Cwd != cwd || record.RealGit != self || record.Route != item.route || record.Depth != item.depth || !reflect.DeepEqual(record.Argv, routed) || !reflect.DeepEqual(record.OriginalArgv, item.args) {
+				if !sameTestPath(t, record.Cwd, cwd) || record.RealGit != self || record.Route != item.route || record.Depth != item.depth || !reflect.DeepEqual(record.Argv, routed) || !reflect.DeepEqual(record.OriginalArgv, item.args) {
 					t.Fatalf("incorrect dispatch record: %+v", record)
 				}
 			}

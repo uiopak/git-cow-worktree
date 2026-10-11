@@ -38,7 +38,7 @@ func TestAntigravityTraceLauncher(t *testing.T) {
 				if err != nil {
 					t.Skipf("%s unavailable", shell)
 				}
-				base := t.TempDir()
+				base := canonicalTempDir(t)
 				app := filepath.Join(base, "Antigravity probe Ω.exe")
 				if err := os.WriteFile(app, appBytes, 0755); err != nil {
 					t.Fatal(err)

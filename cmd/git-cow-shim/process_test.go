@@ -33,6 +33,13 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	canonical, err := filepath.EvalSymlinks(testBin)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.RemoveAll(testBin)
+		os.Exit(1)
+	}
+	testBin = canonical
 	shimBinary = filepath.Join(testBin, executableName("git-cow-shim"))
 	cmd := exec.Command("go", "build", "-o", shimBinary, ".")
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -184,6 +191,30 @@ func capture(t *testing.T, exe string, args, env []string, cwd, input string) (s
 	return out.String(), stderr.String(), 0
 }
 
+// PowerShell expands Windows 8.3 names when resolving executable paths.
+func canonicalTempDir(t *testing.T) string {
+	t.Helper()
+	path, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// Getwd may report /private/var where macOS's temporary directory uses /var.
+func sameTestPath(t *testing.T, actual, expected string) bool {
+	t.Helper()
+	a, err := os.Stat(actual)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.Stat(expected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return os.SameFile(a, b)
+}
+
 func TestProxyStreamsArgsExitAndCwd(t *testing.T) {
 	args := []string{"status", "space and 日本", `quotes" and slash\`, "", "--no-checkout"}
 	cwd := t.TempDir()
@@ -195,7 +226,7 @@ func TestProxyStreamsArgsExitAndCwd(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &report); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(report.Args, args) || report.Input != "stdin Ω\n" || report.Cwd != cwd || report.Depth != "1" || report.Bypass != "1" || !filepath.IsAbs(report.Real) {
+	if !reflect.DeepEqual(report.Args, args) || report.Input != "stdin Ω\n" || !sameTestPath(t, report.Cwd, cwd) || report.Depth != "1" || report.Bypass != "1" || !filepath.IsAbs(report.Real) {
 		t.Fatalf("report=%+v", report)
 	}
 }
@@ -306,7 +337,7 @@ func TestGitOwnsCumulativeCAndConfig(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &report); err != nil {
 		t.Fatal(err)
 	}
-	if report.Cwd != child || !strings.Contains(report.Config, "checkout.workers") || !strings.Contains(report.Config, "two words 日本") || !reflect.DeepEqual(report.Args, []string{"add", "-b", "branch", "path with spaces", "HEAD"}) {
+	if !sameTestPath(t, report.Cwd, child) || !strings.Contains(report.Config, "checkout.workers") || !strings.Contains(report.Config, "two words 日本") || !reflect.DeepEqual(report.Args, []string{"add", "-b", "branch", "path with spaces", "HEAD"}) {
 		t.Fatalf("external report=%+v", report)
 	}
 }
