@@ -1,3 +1,5 @@
 /git-cow-worktree
 /git-cow-worktree.exe
 /dist/
+/.refs-test-tmp/
+/integrations/opencode/node_modules/

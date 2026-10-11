@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "WorktreeCreate": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "git-cow-worktree",
+            "args": ["claude-hook", "create", "--copy-local"],
+            "timeout": 300
+          }
+        ]
+      }
+    ],
+    "WorktreeRemove": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "git-cow-worktree",
+            "args": ["claude-hook", "remove"],
+            "timeout": 60
+          }
+        ]
+      }
+    ]
+  }
+}

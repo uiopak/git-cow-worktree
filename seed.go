@@ -9,38 +9,35 @@ import (
 	"strings"
 )
 
-// finalizeCheckout brings the new worktree's working tree in line with its
-// index, then runs post-checkout with the same arguments `git worktree add`
-// uses for a newly-created worktree. We force checkout.workers=0 so git
+// finalizeCheckoutIO brings the new worktree's working tree in line with its
+// index. The caller runs post-checkout once, after any checkout retry.
+// We force checkout.workers=0 so git
 // parallelises file writes / stat-cache hashing across all CPUs.
 //
 // Files we cloned and vouched for in the index are skipped here, so this
 // writes only what's left; if seeding didn't happen, or the index we wrote
 // was rejected, this degrades to an ordinary full checkout.
-func finalizeCheckout(repoDir, targetSHA string) error {
+func finalizeCheckoutIO(streams commandIO, repoDir string) error {
 	cmd := exec.Command("git",
 		"-c", "checkout.workers=0",
 		"-c", "core.hooksPath="+os.DevNull,
 		"checkout", "-f", "HEAD")
 	cmd.Dir = repoDir
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdin = streams.in
+	cmd.Stdout = streams.out
+	cmd.Stderr = streams.err
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("git checkout: %w", err)
-	}
-	if err := runPostCheckoutHook(repoDir, targetSHA); err != nil {
-		return err
 	}
 	return nil
 }
 
-func runPostCheckoutHook(repoDir, targetSHA string) error {
+func runPostCheckoutHookIO(streams commandIO, repoDir, targetSHA string) error {
 	cmd := exec.Command("git", "hook", "run", "--ignore-missing", "post-checkout", "--", zeroObjectIDFor(targetSHA), targetSHA, "1")
 	cmd.Dir = repoDir
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdin = streams.in
+	cmd.Stdout = streams.out
+	cmd.Stderr = streams.err
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("post-checkout hook: %w", err)
 	}

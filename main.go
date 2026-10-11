@@ -4,9 +4,11 @@ import (
 	"cmp"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -28,9 +30,10 @@ var version = "dev"
 type Options struct {
 	Verbose       bool
 	FromSpecified bool
-	FromPath      string   // --from <path>; empty means auto-pick
-	NoCheckout    bool     // final --no-checkout state (force passthrough)
-	Orphan        bool     // final --orphan state (force passthrough)
+	FromPath      string // --from <path>; empty means auto-pick
+	NoCheckout    bool   // final --no-checkout state (force passthrough)
+	Orphan        bool   // final --orphan state (force passthrough)
+	Help          bool
 	Forward       []string // flags+args forwarded to our internal `git worktree add`
 	GitArgs       []string // sanitized args forwarded to passthrough `git worktree add`
 	UseSeparator  bool     // whether positional args were introduced by --
@@ -39,38 +42,76 @@ type Options struct {
 }
 
 func main() {
-	if len(os.Args) == 2 && os.Args[1] == "--version" {
-		fmt.Printf("%s %s\n", commandName, version)
-		return
-	}
-	if len(os.Args) < 2 || os.Args[1] != "add" {
-		fmt.Fprintf(os.Stderr, "usage: %s add [-b <new-branch>] [-B <branch>] [--from <path>] [-v] <path> [<commit-ish>]\n", commandName)
-		os.Exit(2)
-	}
-	if err := run(os.Args[2:]); err != nil {
-		fmt.Fprintln(os.Stderr, commandName+":", err)
-		os.Exit(1)
-	}
+	os.Exit(cli(os.Args[1:]))
 }
 
+func cli(args []string) int {
+	if len(args) == 1 && args[0] == "--version" {
+		fmt.Printf("%s %s\n", commandName, version)
+		return 0
+	}
+	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
+		printUsage(os.Stdout)
+		return 0
+	}
+	var err error
+	switch {
+	case len(args) > 0 && args[0] == "add":
+		err = run(args[1:])
+	case len(args) > 0 && args[0] == "claude-hook":
+		err = runClaudeHook(args[1:], os.Stdin, os.Stdout, os.Stderr)
+	default:
+		printUsage(os.Stderr)
+		return 2
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, commandName+":", err)
+		if exit, ok := errors.AsType[*exec.ExitError](err); ok && exit.ExitCode() > 0 {
+			return exit.ExitCode()
+		}
+		return 1
+	}
+	return 0
+}
+
+func printUsage(w io.Writer) {
+	fmt.Fprintf(w, "usage: %s add [-b <new-branch>] [-B <branch>] [--from <path>] [-v] <path> [<commit-ish>]\n", commandName)
+	fmt.Fprintf(w, "       %s claude-hook create [--base-ref <ref>] [--root <path>] [--copy-local]\n", commandName)
+	fmt.Fprintf(w, "       %s claude-hook remove [--force]\n", commandName)
+}
+
+type commandIO struct {
+	in       io.Reader
+	out, err io.Writer
+}
+
+func stdIO() commandIO { return commandIO{os.Stdin, os.Stdout, os.Stderr} }
+
 func run(args []string) error {
+	return runWithIO(args, stdIO(), &createdWorktree{})
+}
+
+func runWithIO(args []string, streams commandIO, created *createdWorktree) (runErr error) {
+	repoDir, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	return runWithRepo(args, streams, created, repoDir)
+}
+
+func runWithRepo(args []string, streams commandIO, created *createdWorktree, repoDir string) (runErr error) {
 	opts, err := parseArgs(args)
 	if err != nil {
 		return err
 	}
 
 	// --no-checkout and --orphan cannot use our seed-then-checkout flow.
-	if opts.NoCheckout || opts.Orphan {
-		return execGitWorktreeAdd(opts.GitArgs)
+	if opts.NoCheckout || opts.Orphan || opts.Help {
+		return runGitStreamingIO(streams, repoDir, append([]string{"worktree", "add"}, opts.GitArgs...)...)
 	}
 
 	if opts.TargetPath == "" {
 		return errors.New("missing <path> argument")
-	}
-
-	repoDir, err := os.Getwd()
-	if err != nil {
-		return err
 	}
 
 	var explicitSource *Worktree
@@ -82,15 +123,29 @@ func run(args []string) error {
 		explicitSource = &wt
 	}
 
-	targetAbs, err := osAbs(opts.TargetPath)
+	targetPath := opts.TargetPath
+	if !filepath.IsAbs(targetPath) {
+		targetPath = filepath.Join(repoDir, targetPath)
+	}
+	targetAbs, err := osAbs(targetPath)
 	if err != nil {
 		return err
 	}
+	if err := created.prepare(repoDir, targetAbs); err != nil {
+		return err
+	}
+	defer func() {
+		// A hook failure follows a complete checkout, just as with ordinary
+		// Git. Keep that checkout. Only undo failed materialization here.
+		if runErr != nil && created.ready && !created.materialized {
+			runErr = errors.Join(runErr, created.rollback(streams))
+		}
+	}()
 
 	overallStart := time.Now()
 	phase := func(name string, t0 time.Time) {
 		if opts.Verbose {
-			fmt.Fprintf(os.Stderr, "%s: %-20s %v\n", commandName, name, time.Since(t0).Round(time.Millisecond))
+			fmt.Fprintf(streams.err, "%s: %-20s %v\n", commandName, name, time.Since(t0).Round(time.Millisecond))
 		}
 	}
 
@@ -116,7 +171,7 @@ func run(args []string) error {
 	t := time.Now()
 	var addErr error
 	var wg sync.WaitGroup
-	wg.Go(func() { addErr = runGitStreaming(repoDir, addArgs...) })
+	wg.Go(func() { addErr = runGitStreamingIO(streams, repoDir, addArgs...) })
 
 	guessRev := cmp.Or(opts.CommitIsh, "HEAD")
 	var a *analysis
@@ -128,6 +183,9 @@ func run(args []string) error {
 	if addErr != nil {
 		return fmt.Errorf("git worktree add: %w", addErr)
 	}
+	if err := created.remember(); err != nil {
+		return err
+	}
 	phase("worktree add", t)
 
 	// Resolve target SHA from inside the new worktree (HEAD is now set).
@@ -135,6 +193,7 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
+	created.head = targetSHA
 	if a == nil || a.SHA != targetSHA {
 		t = time.Now()
 		a = analyze(repoDir, targetAbs, targetSHA, explicitSource, opts.Verbose)
@@ -161,7 +220,7 @@ func run(args []string) error {
 
 	// Step 6: finalize.
 	t = time.Now()
-	if err := finalizeCheckout(targetAbs, targetSHA); err != nil {
+	if err := finalizeCheckoutIO(streams, targetAbs); err != nil {
 		if seededIndex == "" {
 			return err
 		}
@@ -170,15 +229,19 @@ func run(args []string) error {
 		// scratch rather than leaving the user a half-populated one.
 		// A checkout that died mid-flight leaves its lock behind; in a
 		// worktree this new, nobody else can own it.
-		fmt.Fprintf(os.Stderr, "%s: checkout failed against seeded index (%v); retrying from scratch\n", commandName, err)
+		fmt.Fprintf(streams.err, "%s: checkout failed against seeded index (%v); retrying from scratch\n", commandName, err)
 		for _, path := range []string{seededIndex, seededIndex + ".lock"} {
 			if rmErr := os.Remove(path); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
 				return err
 			}
 		}
-		if err := finalizeCheckout(targetAbs, targetSHA); err != nil {
+		if err := finalizeCheckoutIO(streams, targetAbs); err != nil {
 			return err
 		}
+	}
+	created.materialized = true
+	if err := runPostCheckoutHookIO(streams, targetAbs, targetSHA); err != nil {
+		return err
 	}
 	phase("checkout", t)
 
@@ -428,6 +491,9 @@ func parseArgs(args []string) (Options, error) {
 		case a == "--no-orphan":
 			o.Orphan = false
 			o.GitArgs = append(o.GitArgs, a)
+		case a == "-h" || a == "--help":
+			o.Help = true
+			o.GitArgs = append(o.GitArgs, a)
 		case strings.HasPrefix(a, "-"):
 			arity := gitWorktreeAddFlagArity(a)
 			if arity == 1 {
@@ -475,10 +541,14 @@ func execGitWorktreeAdd(args []string) error {
 }
 
 func runGitStreaming(dir string, args ...string) error {
+	return runGitStreamingIO(stdIO(), dir, args...)
+}
+
+func runGitStreamingIO(streams commandIO, dir string, args ...string) error {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdin = streams.in
+	cmd.Stdout = streams.out
+	cmd.Stderr = streams.err
 	return cmd.Run()
 }

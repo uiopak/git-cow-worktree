@@ -101,6 +101,34 @@ func build(version, target, output, work string) error {
 		{binaryPath, binary, 0755},
 		{"README.md", "README.md", 0644},
 		{"LICENSE", "LICENSE", 0644},
+		{"docs/integrations.md", "docs/integrations.md", 0644},
+		{"integrations/claude/settings.json", "integrations/claude/settings.json", 0644},
+	}
+	for _, name := range []string{"README.md", "package.json", "bun.lock", "index.ts", "strategy.ts", "command.ts"} {
+		path := "integrations/opencode/" + name
+		files = append(files, archiveFile{path, path, 0644})
+	}
+	if goos == "windows" {
+		shim := "git-cow-shim.exe"
+		shimPath := filepath.Join(work, shim)
+		shimCmd := exec.Command("go", "build", "-trimpath", "-ldflags", "-s -w -X main.version="+version, "-o", shimPath, "./cmd/git-cow-shim")
+		shimCmd.Env = cmd.Env
+		shimCmd.Stdout, shimCmd.Stderr = os.Stdout, os.Stderr
+		if err := shimCmd.Run(); err != nil {
+			return fmt.Errorf("build shim: %w", err)
+		}
+		files = append(files,
+			archiveFile{shimPath, shim, 0755},
+			archiveFile{"integrations/t3/Start-T3WithCow.ps1", "integrations/t3/Start-T3WithCow.ps1", 0644},
+			archiveFile{"integrations/codex/Start-ChatGPTWithCowTrace.ps1", "integrations/codex/Start-ChatGPTWithCowTrace.ps1", 0644},
+			archiveFile{"integrations/codex/README.md", "integrations/codex/README.md", 0644},
+			archiveFile{"integrations/antigravity/Start-AntigravityWithCowTrace.ps1", "integrations/antigravity/Start-AntigravityWithCowTrace.ps1", 0644},
+			archiveFile{"integrations/antigravity/README.md", "integrations/antigravity/README.md", 0644},
+		)
+		for _, name := range []string{"README.md", "Common.ps1", "ExtentProbe.cs", "Prepare-SmokeRepo.ps1", "Start-Smoke.ps1", "Verify-Worktree.ps1"} {
+			path := "integrations/t3/smoke/" + name
+			files = append(files, archiveFile{path, path, 0644})
+		}
 	}
 	asset := fmt.Sprintf("%s_%s_%s_%s%s", commandName, version, goos, goarch, ext)
 	assetPath := filepath.Join(work, asset)

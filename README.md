@@ -48,6 +48,18 @@ go build -o git-cow-worktree .
 
 On Windows, use `go build -o git-cow-worktree.exe .`.
 
+## AI tool integrations
+
+Claude Code can use the compiled `claude-hook create` and `claude-hook remove` commands through its native worktree hooks. The archive includes a settings example. [Windows user settings and GUI setup](docs/integrations.md#windows-user-settings-and-gui) enable this for local Claude sessions. Windows archives also include the optional `git-cow-shim.exe`, a T3 launcher, and a [ChatGPT/Codex trace launcher](integrations/codex/README.md). Automatic COW creation was verified in T3, in the Windows Claude GUI through native hooks, and in Windows ChatGPT app version `26.1007.2314.0`.
+
+See [integration setup](docs/integrations.md) for configuration, removal, and the tested flows and limitations. Worktrees must share a supported volume with their source to get copy-on-write storage. For a repository on a ReFS `V:` volume, create worktrees on `V:` too.
+
+[OpenCode v2](integrations/opencode/README.md) can use a native worktree strategy plugin. It honors OpenCode's destination and starting ref, records ownership, and protects dirty worktrees during removal. The plugin targets OpenCode `2.0.26`; both native API and desktop GUI creation were verified on Windows ReFS, sharing all 64 MiB of the test fixture's binary data.
+
+Windows archives also include an experimental [Antigravity 2 trace launcher](integrations/antigravity/README.md). Native New Worktree creation shared all 64 MiB in the ReFS fixture after redirecting its storage through a directory junction. Its default NTFS destination used ordinary checkout. The guide covers setup, verification and the successful write-isolation test. Isolated subagent creation still needs a separate test.
+
+For everyday T3 use on Windows, see the [suggested desktop shortcut](docs/integrations.md#suggested-desktop-shortcut) and [update/restart instructions](docs/integrations.md#updates-and-restarts). The shortcut starts T3 with the COW environment; after an automatic update, exit T3 and reopen it through that shortcut.
+
 ## Usage
 
 ```sh
@@ -118,8 +130,8 @@ GitHub Actions tests changes on Windows, Linux and macOS, then builds all seven 
 Push a version tag to publish a GitHub release automatically:
 
 ```sh
-git tag -a v0.0.1 -m "Release v0.0.1"
-git push origin v0.0.1
+git tag -a v0.0.2 -m "Release v0.0.2"
+git push origin v0.0.2
 ```
 
 Commit and push the release's source changes before tagging. Use the next version for later releases. Publication waits for every test and build, verifies archive checksums, then publishes the release with Windows ZIP files, Linux and macOS tarballs, and `checksums.txt`. Tags such as `v0.0.2-rc.1` publish prereleases.
