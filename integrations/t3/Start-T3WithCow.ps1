@@ -7,13 +7,19 @@ param(
     [string] $T3Path,
     [string[]] $T3Arguments = @(),
     [string] $ShimDirectory = (Join-Path $env:LOCALAPPDATA 'git-cow-worktree\t3-shim'),
-    [switch] $CheckOnly,
+    [Alias('check-only', '-check-only')][switch] $CheckOnly,
     [switch] $Trace,
-    [string] $TraceFile
+    [string] $TraceFile,
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [AllowEmptyString()][string[]] $RemainingT3Arguments = @()
 )
 
 $ErrorActionPreference = 'Stop'
 if ($env:OS -ne 'Windows_NT') { throw 'This launcher requires Windows.' }
+
+# The NSIS updater opens the Start Menu shortcut with --updated. Preserve app
+# arguments appended to the shortcut, as well as explicitly supplied arguments.
+$T3Arguments = @($T3Arguments) + @($RemainingT3Arguments)
 
 function Resolve-NativeExecutable([string] $Value, [string] $Name, [string[]] $Candidates) {
     if ($Value) {

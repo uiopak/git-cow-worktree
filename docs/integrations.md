@@ -133,7 +133,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\integrations\t3\Start-T3Wi
   -CheckOnly
 ```
 
-Then use the same command without `-CheckOnly`, adding `-Trace` for the first test. Use `-TraceFile 'V:\cow-logs\shim.jsonl'` for durable evidence, after creating its parent directory. Supply `-CowPath` and `-ShimPath` if the two binaries are installed separately. Optional `-T3Arguments` accepts an argument array. `-ShimDirectory` defaults to a dedicated folder under local app data. For an updated shim, choose a fresh dedicated directory if the existing copy differs; the launcher refuses to overwrite unrelated executables.
+Then use the same command without `-CheckOnly`, adding `-Trace` for the first test. Use `-TraceFile 'V:\cow-logs\shim.jsonl'` for durable evidence, after creating its parent directory. Supply `-CowPath` and `-ShimPath` if the two binaries are installed separately. Optional `-T3Arguments` accepts an argument array. Extra application arguments appended to a shortcut, including the updater's `--updated`, are forwarded to T3. `--check-only` is also accepted as a launcher preflight switch. `-ShimDirectory` defaults to a dedicated folder under local app data. For an updated shim, choose a fresh dedicated directory if the existing copy differs; the launcher refuses to overwrite unrelated executables.
 
 ### Suggested desktop shortcut
 
@@ -155,6 +155,11 @@ $shortcutPath = Join-Path ([Environment]::GetFolderPath('Desktop')) 'T3 Code COW
 if (Test-Path -LiteralPath $shortcutPath) {
     throw "Shortcut already exists: $shortcutPath. Edit it in Properties or choose another name."
 }
+# Preserve T3's app identity, so its window and taskbar shortcut group together.
+$installedShortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\T3 Code (Nightly).lnk'
+if (Test-Path -LiteralPath $installedShortcut -PathType Leaf) {
+    Copy-Item -LiteralPath $installedShortcut -Destination $shortcutPath
+}
 $shell = New-Object -ComObject WScript.Shell
 $shortcut = $shell.CreateShortcut($shortcutPath)
 $shortcut.TargetPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
@@ -169,11 +174,62 @@ The snippet creates the shortcut without launching T3. If a launch fails, run th
 
 For separately installed binaries, add `-CowPath` and `-ShimPath` to both the check command and the shortcut's arguments. You can edit those arguments later in the shortcut's **Properties → Target**. Desktop and taskbar entries created by T3's installer can still launch T3 directly, so use the **T3 Code COW** shortcut when enabling this integration.
 
+### Silent launch and taskbar pinning
+
+A shortcut that starts `powershell.exe` can briefly show a terminal before PowerShell applies `-WindowStyle Hidden`. The optional [windowless launcher](../integrations/t3/HiddenLauncher.cs) starts PowerShell with `CreateNoWindow` from a GUI executable. It runs the same COW script and forwards the remaining arguments, including the updater's `--updated`. This adds a small launcher executable; the COW and Git shim binaries need no changes.
+
+Build the helper once with the Windows .NET Framework compiler, then update the desktop shortcut created above. This needs no Go. The example uses Windows PowerShell 5.1 and retains the script path and configuration already saved in the shortcut.
+
+```powershell
+$ErrorActionPreference = 'Stop'
+$installRoot = 'C:\Tools\git-cow-worktree'
+$source = Join-Path $installRoot 'integrations\t3\HiddenLauncher.cs'
+$hiddenLauncher = Join-Path $installRoot 'T3CowLauncher.exe'
+$shortcutPath = Join-Path ([Environment]::GetFolderPath('Desktop')) 'T3 Code COW.lnk'
+$compiler = @(
+    (Join-Path $env:SystemRoot 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'),
+    (Join-Path $env:SystemRoot 'Microsoft.NET\Framework\v4.0.30319\csc.exe')
+) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+if (-not $compiler) { throw 'Windows .NET Framework compiler not found.' }
+if (-not (Test-Path -LiteralPath $shortcutPath -PathType Leaf)) {
+    throw 'Create the COW desktop shortcut first.'
+}
+$shell = New-Object -ComObject WScript.Shell
+$shortcut = $shell.CreateShortcut($shortcutPath)
+$fileArguments = [regex]::Match($shortcut.Arguments, '(?i)(?:^|\s)-File\s+(.+)$')
+if ([IO.Path]::GetFileName($shortcut.TargetPath) -ine 'powershell.exe' -or -not $fileArguments.Success) {
+    throw 'Expected a Windows PowerShell shortcut with -File arguments.'
+}
+& $compiler /nologo /target:winexe /reference:System.Windows.Forms.dll "/out:$hiddenLauncher" $source
+if ($LASTEXITCODE -ne 0) { throw 'Windowless launcher compilation failed.' }
+$backup = Join-Path $installRoot ('T3-shortcut-before-silent-{0}.lnk' -f [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss-fffffff'))
+Copy-Item -LiteralPath $shortcutPath -Destination $backup
+$shortcut.TargetPath = $hiddenLauncher
+$shortcut.Arguments = $fileArguments.Groups[1].Value
+$shortcut.Save()
+```
+
+The first argument to `T3CowLauncher.exe` is the absolute `.ps1` path; the rest are arguments for that script. Keep the script's `-T3Path`, `-RealGit`, and any other existing configuration. The helper preserves the working directory and child exit code. Its own startup errors appear in a dialog. For script diagnostics, run the original PowerShell command in an existing terminal. A personal wrapper can also show script errors in a dialog, as the tested installation does.
+
+Give the installed Start Menu shortcut the same target and arguments when you want update launches to stay silent too. Preserve T3's icon, working directory and app identity by editing its existing `.lnk` or a copy of it. See [updates and restarts](#updates-and-restarts) for that separate update route.
+
+To pin it manually, right-click the configured **T3 Code COW** shortcut, choose **Show more options → Pin to taskbar**. Pin this configured shortcut so taskbar launches use the COW environment. If it was pinned before changing the target, unpin that entry and pin the updated shortcut again. The setup snippets above do not pin anything automatically. The taskbar pin has no effect on T3's Start Menu update shortcut.
+
+Silent desktop startup was confirmed on Windows on October 12, 2026. Tests cover the GUI executable, updater arguments, spaces, Unicode, quotes, trailing backslashes, empty arguments, literal shell characters, working directory and exit status. The installed launcher also passed `--check-only --updated`. The live update and ReFS sharing check below preceded the silent helper; a future update should still be checked after enabling it.
+
 ### Updates and restarts
 
 Keep the COW installation outside T3's application directory. A T3 update should leave the launcher and companion binaries there intact. The shortcut remains usable as long as T3's executable stays at the configured path; edit its target if that path changes or you switch between Stable and Nightly.
 
-[T3 updates can close and relaunch the desktop app](https://github.com/pingdotgg/t3code/blob/main/docs/user/updating.md). On Windows, its updater launches a separate installer. Automatic update relaunches have not been verified to preserve the shim environment. After an update finishes, exit T3 completely and reopen it through **T3 Code COW**. Use a new disposable worktree and the [smoke check](../integrations/t3/smoke/README.md) when checking a new T3 version.
+[T3 updates can close and relaunch the desktop app](https://github.com/pingdotgg/t3code/blob/main/docs/user/updating.md). On Windows, its Electron updater starts a separate NSIS installer. The installer [opens the installed Start Menu shortcut](https://github.com/electron-userland/electron-builder/blob/master/packages/app-builder-lib/templates/nsis/installSection.nsh) when it exists and [passes `--updated`](https://github.com/electron-userland/electron-builder/blob/master/packages/app-builder-lib/templates/nsis/common.nsh). A desktop shortcut alone does not configure that update route. A launcher that accepts only its own flags can reject the extra argument.
+
+To route automatic update launches through COW, back up the existing T3 Start Menu shortcut, then give it the same launcher target and arguments as your COW desktop shortcut. This can be PowerShell or the [windowless helper](#silent-launch-and-taskbar-pinning). For a current-user Nightly install, it is usually `%APPDATA%\Microsoft\Windows\Start Menu\Programs\T3 Code (Nightly).lnk`. Preserve its icon, working directory and app identity. If you use a personal wrapper script, it must collect remaining application arguments and pass them to `Start-T3WithCow.ps1` through `-T3Arguments`; the generic launcher already forwards arguments appended by the installer. Keep the backup to restore normal Start Menu launches later.
+
+The updater argument and Windows shortcut launch route were tested with helper executables under PowerShell 5.1 and 7. A live Windows update from `0.0.46-nightly.20261011.2980` to `0.0.46-nightly.20261012.3021` was verified on October 12, 2026. The app reopened after updating and preserved the configured desktop and Start Menu shortcuts. A new worktree created through that GUI shared all 64 MiB of the ReFS fixture's binary data with its source. The trace recorded a successful COW dispatch, the new worktree had correct HEAD and contents with clean Git status, and all 11 source file hashes and the source HEAD stayed unchanged.
+
+Repeat the check after later updates, since installer versions can change shortcut handling. Enable `-TraceFile`, apply the update, then create a new disposable worktree and run the [smoke check](../integrations/t3/smoke/README.md). If the trace does not show COW routing, exit T3 completely and reopen it through the COW shortcut.
+
+A [normal T3 relaunch](https://github.com/pingdotgg/t3code/blob/main/apps/desktop/src/app/DesktopLifecycle.ts) starts its app executable with the existing arguments. That differs from an installer opening a shortcut. Each launch creates a new process; COW routing depends on the Git executable and environment it receives.
 
 Existing COW worktrees retain their shared storage when the app restarts without the shim. The shim affects creation of new worktrees.
 
@@ -209,7 +265,7 @@ Cursor's worktree setup commands run on the checkout it creates. Its Agents Wind
 
 Codex inside the Windows ChatGPT desktop app was verified with the optional shim on October 11, 2026, using app version `26.1007.2314.0`. The app issued `worktree add --detach` with global Git options, and the shim redirected it to `cow-worktree add`. All 64 MiB of the ReFS fixture's binary data shared physical disk extents with the source; contents, HEAD, and Git status were correct. The normal-app baseline shared 0 bytes. This test covers automatic creation from a clean `main` checkout in that app version.
 
-Use the [ChatGPT worktree trace launcher](../integrations/codex/README.md) to enable the shim for the app and verify another installation. It records shim decisions and Git's own traces in separate files and checks the trace writers before starting the app. It resolves the installed Windows package at each launch, so package version directory changes do not require editing its path.
+Use the [ChatGPT worktree trace launcher](../integrations/codex/README.md) to enable the shim for the app and verify another installation. It records shim decisions and Git's own traces in separate files and checks the trace writers before starting the app. It resolves the installed Windows package at each launch, so package version directory changes do not require editing its path. The [silent desktop shortcut](../integrations/codex/README.md#silent-desktop-shortcut) reuses the windowless helper, the [icon guide](../integrations/codex/README.md#icon-matching) explains how to match the normal packaged app's logo, and the [taskbar guide](../integrations/codex/README.md#taskbar-grouping) covers app identity and refreshing an existing pin.
 
 The previously inspected Codex Rust worktree implementation creates metadata with `worktree add --no-checkout`, then materializes files with `reset --hard`. The add-only shim preserves that workflow. It requires a separate provisioning integration if used by another Codex creation route; do not intercept `reset --hard` globally. Codex running as T3's provider uses the worktree provisioned by T3.
 

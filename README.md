@@ -58,7 +58,7 @@ See [integration setup](docs/integrations.md) for configuration, removal, and th
 
 Windows archives also include an experimental [Antigravity 2 trace launcher](integrations/antigravity/README.md). Native New Worktree creation shared all 64 MiB in the ReFS fixture after redirecting its storage through a directory junction. Its default NTFS destination used ordinary checkout. The guide covers setup, verification and the successful write-isolation test. Isolated subagent creation still needs a separate test.
 
-For everyday T3 use on Windows, see the [suggested desktop shortcut](docs/integrations.md#suggested-desktop-shortcut) and [update/restart instructions](docs/integrations.md#updates-and-restarts). The shortcut starts T3 with the COW environment; after an automatic update, exit T3 and reopen it through that shortcut.
+For everyday T3 use on Windows, see the [suggested desktop shortcut](docs/integrations.md#suggested-desktop-shortcut), [silent startup and manual taskbar pinning](docs/integrations.md#silent-launch-and-taskbar-pinning), and [update/restart instructions](docs/integrations.md#updates-and-restarts). The Windows updater uses the Start Menu shortcut and passes `--updated`. Configure that shortcut too when you want automatic update launches to use COW. Verify routing after an update, or reopen T3 through the COW shortcut.
 
 ## Usage
 

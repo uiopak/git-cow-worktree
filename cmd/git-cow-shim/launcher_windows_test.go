@@ -4,10 +4,12 @@ package main
 
 import (
 	"bytes"
+	"debug/pe"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +17,170 @@ import (
 
 func psLiteral(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+}
+
+func TestT3HiddenLauncher(t *testing.T) {
+	compiler := filepath.Join(os.Getenv("SystemRoot"), "Microsoft.NET", "Framework64", "v4.0.30319", "csc.exe")
+	if _, err := os.Stat(compiler); err != nil {
+		compiler = filepath.Join(os.Getenv("SystemRoot"), "Microsoft.NET", "Framework", "v4.0.30319", "csc.exe")
+		if _, err := os.Stat(compiler); err != nil {
+			t.Skip("Windows .NET Framework compiler unavailable")
+		}
+	}
+	base := canonicalTempDir(t)
+	launcher := filepath.Join(base, "T3 COW Launcher.exe")
+	source, err := filepath.Abs(filepath.Join("..", "..", "integrations", "t3", "HiddenLauncher.cs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(compiler, "/nologo", "/target:winexe", "/reference:System.Windows.Forms.dll", "/out:"+launcher, source).CombinedOutput(); err != nil {
+		t.Fatalf("compile windowless launcher: %v\n%s", err, out)
+	}
+	binary, err := pe.Open(launcher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer binary.Close()
+	header, ok := binary.OptionalHeader.(*pe.OptionalHeader32)
+	if !ok || header.Subsystem != 2 {
+		t.Fatal("launcher must use the Windows GUI subsystem")
+	}
+	script := filepath.Join(base, "shortcut wrapper with spaces.ps1")
+	reportFile := filepath.Join(base, "arguments.json")
+	body := "param([Alias('check-only','-check-only')][switch] $CheckOnly,[Parameter(ValueFromRemainingArguments=$true)][AllowEmptyString()][string[]] $AppArguments=@())\n" +
+		"Import-Module (Join-Path $PSHOME 'Modules\\Microsoft.PowerShell.Utility\\Microsoft.PowerShell.Utility.psd1') -ErrorAction Stop\n" +
+		"$report=@{check=[bool]$CheckOnly;args=@($AppArguments);directory=[Environment]::CurrentDirectory}; " +
+		"[IO.File]::WriteAllText($env:GIT_COW_TEST_REPORT,($report|ConvertTo-Json -Compress),[Text.UTF8Encoding]::new($false)); " +
+		"if($env:GIT_COW_TEST_EXIT){exit ([int]$env:GIT_COW_TEST_EXIT)}\n"
+	if err := os.WriteFile(script, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"--updated", "folder 日本 with spaces", `quote"`, `C:\path with space\`, "literal $(never-run) `ticks` & ; %PATH%", ""}
+	for _, check := range []string{"", "--check-only"} {
+		args := []string{script}
+		if check != "" {
+			args = append(args, check)
+		}
+		cmd := exec.Command(launcher, append(args, want...)...)
+		cmd.Dir = base
+		cmd.Env = withEnv(withEnv(cleanEnv(t), "PSModulePath", ""), "GIT_COW_TEST_REPORT", reportFile)
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("windowless launcher: %v", err)
+		}
+		data, err := os.ReadFile(reportFile)
+		var report struct {
+			Check     bool     `json:"check"`
+			Args      []string `json:"args"`
+			Directory string   `json:"directory"`
+		}
+		if err != nil || json.Unmarshal(data, &report) != nil || !slices.Equal(report.Args, want) || report.Check != (check != "") || !sameTestPath(t, base, report.Directory) {
+			t.Fatalf("hidden launch changed arguments, check flag, or directory: %v %q", err, data)
+		}
+	}
+	cmd := exec.Command(launcher, script)
+	cmd.Env = withEnv(withEnv(withEnv(cleanEnv(t), "PSModulePath", ""), "GIT_COW_TEST_REPORT", reportFile), "GIT_COW_TEST_EXIT", "23")
+	err = cmd.Run()
+	if failure, ok := err.(*exec.ExitError); !ok || failure.ExitCode() != 23 {
+		t.Fatalf("hidden launcher lost child exit code: %v", err)
+	}
+}
+
+func TestT3LauncherForwardsUpdaterArguments(t *testing.T) {
+	git, cow := realGit(t), cowBinary(t)
+	script, err := filepath.Abs(filepath.Join("..", "..", "integrations", "t3", "Start-T3WithCow.ps1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	self, _ := os.Executable()
+	for _, shell := range []string{"powershell.exe", "pwsh.exe"} {
+		t.Run(shell, func(t *testing.T) {
+			path, err := exec.LookPath(shell)
+			if err != nil {
+				t.Skipf("%s unavailable", shell)
+			}
+			base := canonicalTempDir(t)
+			proxy := filepath.Join(base, "proxy")
+			reportPath := filepath.Join(base, "child.json")
+			arguments := []string{"--updated", "folder 日本 with spaces", "--disable-gpu"}
+			invocation := []string{"-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script,
+				"-RealGit", git, "-CowPath", cow, "-ShimPath", shimBinary, "-T3Path", self, "-ShimDirectory", proxy}
+			env := withEnv(cleanEnv(t), "PSModulePath", "")
+			env = withEnv(env, "GIT_COW_TEST_HELPER", "launcher")
+			env = withEnv(env, "GIT_COW_TEST_REPORT", reportPath)
+			// Both spellings are checks only, even when the updater appends its
+			// application marker. They must not create a proxy or start a child.
+			for _, check := range []string{"-CheckOnly", "--check-only"} {
+				cmd := exec.Command(path, append(append([]string(nil), invocation...), check, "--updated")...)
+				cmd.Env, cmd.Dir = env, base
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("updater preflight: %v\n%s", err, out)
+				}
+				for _, created := range []string{proxy, reportPath} {
+					if _, err := os.Stat(created); !os.IsNotExist(err) {
+						t.Fatalf("check created %s: %v", created, err)
+					}
+				}
+			}
+			cmd := exec.Command(path, append(invocation, arguments...)...)
+			cmd.Env, cmd.Dir = env, base
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("updater launch: %v\n%s", err, out)
+			}
+			deadline := time.Now().Add(10 * time.Second)
+			var data []byte
+			for time.Now().Before(deadline) {
+				data, err = os.ReadFile(reportPath)
+				if err == nil && json.Valid(data) {
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			var report helperReport
+			if err != nil || json.Unmarshal(data, &report) != nil {
+				t.Fatalf("updater child did not report: %v %q", err, data)
+			}
+			if !slices.Equal(report.Args, arguments) || report.Real != git || report.Bypass != "" || report.Depth != "" ||
+				!strings.HasPrefix(report.Path, proxy+";"+filepath.Dir(cow)+";") {
+				t.Fatalf("updater arguments or COW environment changed: %+v", report)
+			}
+			// NSIS opens a .lnk through ShellExecute with --updated appended.
+			// Exercise that route too, using only the test helper as the app.
+			if err := os.Remove(reportPath); err != nil {
+				t.Fatal(err)
+			}
+			wrapper := filepath.Join(base, "shortcut launcher.ps1")
+			diagnostic := filepath.Join(base, "shortcut-error.txt")
+			body := "param([Parameter(ValueFromRemainingArguments=$true)][string[]] $AppArgs=@())\n" +
+				"$ErrorActionPreference='Stop'\n$env:GIT_COW_TEST_HELPER='launcher'\n$env:GIT_COW_TEST_REPORT=" + psLiteral(reportPath) + "\n" +
+				"try { & " + psLiteral(script) + " -RealGit " + psLiteral(git) + " -CowPath " + psLiteral(cow) +
+				" -ShimPath " + psLiteral(shimBinary) + " -T3Path " + psLiteral(self) + " -ShimDirectory " + psLiteral(proxy) + " -T3Arguments $AppArgs } catch { [IO.File]::WriteAllText(" + psLiteral(diagnostic) + ", $_.ToString() + [Environment]::NewLine + $_.ScriptStackTrace); exit 1 }\n"
+			if err := os.WriteFile(wrapper, append([]byte{0xef, 0xbb, 0xbf}, []byte(body)...), 0600); err != nil {
+				t.Fatal(err)
+			}
+			shortcut := filepath.Join(base, "T3 test shortcut.lnk")
+			command := "$ErrorActionPreference='Stop'; $shell=New-Object -ComObject WScript.Shell; $link=$shell.CreateShortcut(" + psLiteral(shortcut) + "); " +
+				"$link.TargetPath=" + psLiteral(path) + "; $link.Arguments=" + psLiteral("-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \""+wrapper+"\"") +
+				"; $link.WorkingDirectory=" + psLiteral(base) + "; $link.Save(); $child=Start-Process -FilePath " + psLiteral(shortcut) + " -ArgumentList '--updated' -WindowStyle Hidden -PassThru; $child.WaitForExit(); if($child.ExitCode -ne 0){throw ('Shortcut target exited '+$child.ExitCode)}"
+			cmd = exec.Command(path, "-NoProfile", "-NonInteractive", "-Command", command)
+			cmd.Env = withEnv(cleanEnv(t), "PSModulePath", "")
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("updater shortcut: %v\n%s", err, out)
+			}
+			deadline = time.Now().Add(10 * time.Second)
+			for time.Now().Before(deadline) {
+				data, err = os.ReadFile(reportPath)
+				if err == nil && json.Valid(data) {
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if err != nil || json.Unmarshal(data, &report) != nil || !slices.Equal(report.Args, []string{"--updated"}) ||
+				report.Real != git || report.Bypass != "" || !strings.HasPrefix(report.Path, proxy+";"+filepath.Dir(cow)+";") {
+				detail, _ := os.ReadFile(diagnostic)
+				t.Fatalf("shortcut lost updater arguments or COW environment: %v args=%q\n%s", err, report.Args, detail)
+			}
+		})
+	}
 }
 
 func TestT3LauncherCheckAndProcessEnvironment(t *testing.T) {
